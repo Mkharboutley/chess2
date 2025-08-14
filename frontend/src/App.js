@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
 
 // Chess piece Unicode symbols with better visual distinction
 const PIECE_SYMBOLS = {
@@ -63,67 +63,71 @@ function App() {
       };
       
       wsRef.current.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        console.log('Received WebSocket message:', message);
-        
-        switch (message.type) {
-          case 'board_state':
-            console.log('Updating board from WebSocket:', message.board);
-            setBoard(message.board || {});
-            setCurrentTurn(message.current_turn || 'white');
-            setGameStatus(message.game_status || 'waiting');
-            setPlayer1Name(message.player1_name || '');
-            setPlayer2Name(message.player2_name || '');
-            setUndoRequests(message.undo_requests || []);
-            setRematchRequests(message.rematch_requests || []);
-            break;
-          case 'move':
-            setBoard(prevBoard => {
-              const newBoard = { ...prevBoard };
-              delete newBoard[message.from_square];
-              newBoard[message.to_square] = message.piece;
-              return newBoard;
-            });
-            setCurrentTurn(message.current_turn);
-            setMoveHistory(prev => [...prev, {
-              from: message.from_square,
-              to: message.to_square,
-              piece: message.piece,
-              player: message.player
-            }]);
-            break;
-          case 'invalid_move':
-            setInvalidMoveMessage(message.reason);
-            setTimeout(() => setInvalidMoveMessage(''), 3000);
-            break;
-          case 'webrtc_signal':
-            handleWebRTCSignal(message.signal);
-            break;
-          case 'player_disconnected':
-            console.log('Player disconnected:', message.player_id);
-            break;
-          case 'game_resigned':
-            setGameStatus('resigned');
-            setWinner(message.resigned_by === playerId ? 
-              (playerInfo?.color === 'white' ? 'black' : 'white') : playerInfo?.color);
-            break;
-          case 'undo_requested':
-            fetchBoardState();
-            break;
-          case 'rematch_requested':
-            fetchBoardState();
-            break;
-          case 'rematch_started':
-            setBoard({});
-            setCurrentTurn('white');
-            setGameStatus('active');
-            setWinner(null);
-            setMoveHistory([]);
-            setUndoRequests([]);
-            setRematchRequests([]);
-            break;
-          default:
-            break;
+        try {
+          const message = JSON.parse(event.data);
+          console.log('Received WebSocket message:', message);
+          
+          switch (message.type) {
+            case 'board_state':
+              console.log('Updating board from WebSocket:', message.board);
+              setBoard(message.board || {});
+              setCurrentTurn(message.current_turn || 'white');
+              setGameStatus(message.game_status || 'waiting');
+              setPlayer1Name(message.player1_name || '');
+              setPlayer2Name(message.player2_name || '');
+              setUndoRequests(message.undo_requests || []);
+              setRematchRequests(message.rematch_requests || []);
+              break;
+            case 'move':
+              setBoard(prevBoard => {
+                const newBoard = { ...prevBoard };
+                delete newBoard[message.from_square];
+                newBoard[message.to_square] = message.piece;
+                return newBoard;
+              });
+              setCurrentTurn(message.current_turn);
+              setMoveHistory(prev => [...prev, {
+                from: message.from_square,
+                to: message.to_square,
+                piece: message.piece,
+                player: message.player
+              }]);
+              break;
+            case 'invalid_move':
+              setInvalidMoveMessage(message.reason);
+              setTimeout(() => setInvalidMoveMessage(''), 3000);
+              break;
+            case 'webrtc_signal':
+              handleWebRTCSignal(message.signal);
+              break;
+            case 'player_disconnected':
+              console.log('Player disconnected:', message.player_id);
+              break;
+            case 'game_resigned':
+              setGameStatus('resigned');
+              setWinner(message.resigned_by === playerId ? 
+                (playerInfo?.color === 'white' ? 'black' : 'white') : playerInfo?.color);
+              break;
+            case 'undo_requested':
+              fetchBoardState();
+              break;
+            case 'rematch_requested':
+              fetchBoardState();
+              break;
+            case 'rematch_started':
+              setBoard({});
+              setCurrentTurn('white');
+              setGameStatus('active');
+              setWinner(null);
+              setMoveHistory([]);
+              setUndoRequests([]);
+              setRematchRequests([]);
+              break;
+            default:
+              break;
+          }
+        } catch (error) {
+          console.error('Error parsing WebSocket message:', error);
         }
       };
       
@@ -148,7 +152,11 @@ function App() {
         console.log('WebSocket failed, using REST API fallback');
         const pollInterval = setInterval(async () => {
           if (gameState === 'playing' && connectionStatus !== 'connected') {
-            await fetchBoardState();
+            try {
+              await fetchBoardState();
+            } catch (error) {
+              console.error('Error in polling fallback:', error);
+            }
           } else {
             clearInterval(pollInterval);
           }
@@ -162,7 +170,11 @@ function App() {
       // Use REST API as fallback
       const pollInterval = setInterval(async () => {
         if (gameState === 'playing') {
-          await fetchBoardState();
+          try {
+            await fetchBoardState();
+          } catch (error) {
+            console.error('Error in REST API fallback:', error);
+          }
         } else {
           clearInterval(pollInterval);
         }
@@ -310,6 +322,9 @@ function App() {
   const joinRoom = async (roomIdToJoin = roomId) => {
     try {
       const playerId = `player_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      console.log('Joining room:', roomIdToJoin, 'as player:', playerId);
+      
       const response = await fetch(`${BACKEND_URL}/api/rooms/${roomIdToJoin}/join`, {
         method: 'POST',
         headers: {
@@ -321,7 +336,14 @@ function App() {
         }),
       });
       
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to join room');
+      }
+      
       const data = await response.json();
+      console.log('Join room response:', data);
+      
       setPlayerInfo(data);
       setGameState('playing');
       
@@ -337,7 +359,11 @@ function App() {
         // Set up periodic polling as fallback
         const pollInterval = setInterval(async () => {
           if (gameState === 'playing') {
-            await fetchBoardState(roomIdToJoin);
+            try {
+              await fetchBoardState(roomIdToJoin);
+            } catch (error) {
+              console.error('Error in polling:', error);
+            }
           } else {
             clearInterval(pollInterval);
           }
@@ -354,11 +380,15 @@ function App() {
 
   const makeMove = (fromSquare, toSquare) => {
     const piece = board[fromSquare];
+    console.log('Attempting move:', fromSquare, 'to', toSquare, 'piece:', piece);
+    
     if (!piece || !piece.startsWith(playerInfo?.color) || currentTurn !== playerInfo?.color) {
+      console.log('Move rejected - not your turn or piece');
       return false;
     }
     
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      console.log('Sending move via WebSocket');
       wsRef.current.send(JSON.stringify({
         type: 'move',
         from_square: fromSquare,
@@ -366,11 +396,15 @@ function App() {
         piece: piece,
         player_color: playerInfo?.color
       }));
+    } else {
+      console.log('WebSocket not available, move not sent');
     }
     return true;
   };
 
   const handleSquareClick = (square) => {
+    console.log('Square clicked:', square, 'selected:', selectedSquare);
+    
     if (selectedSquare && selectedSquare !== square) {
       if (makeMove(selectedSquare, square)) {
         setSelectedSquare(null);
@@ -442,9 +476,22 @@ function App() {
 
   const copyRoomId = () => {
     if (playerInfo?.room_id) {
-      navigator.clipboard.writeText(playerInfo.room_id);
-      setShowRoomShare(true);
-      setTimeout(() => setShowRoomShare(false), 2000);
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(playerInfo.room_id).then(() => {
+          setShowRoomShare(true);
+          setTimeout(() => setShowRoomShare(false), 2000);
+        }).catch(() => {
+          // Fallback for older browsers
+          const textArea = document.createElement('textarea');
+          textArea.value = playerInfo.room_id;
+          document.body.appendChild(textArea);
+          textArea.select();
+          document.execCommand('copy');
+          document.body.removeChild(textArea);
+          setShowRoomShare(true);
+          setTimeout(() => setShowRoomShare(false), 2000);
+        });
+      }
     }
   };
 
@@ -507,7 +554,7 @@ function App() {
           <div className="features-list">
             <h3>Features:</h3>
             <ul>
-              <li>✓ Real-time multiplayer with WebSockets</li>
+              <li>✓ Real-time multiplayer (WebSocket + REST fallback)</li>
               <li>✓ 3D chess pieces with drag & drop</li>
               <li>✓ Voice chat with WebRTC</li>
               <li>✓ Complete chess rules validation</li>
@@ -548,7 +595,7 @@ function App() {
           <div className="controls-panel">
             <div className="status-indicators">
               <div className={`connection-status ${connectionStatus}`}>
-                WebSocket: {connectionStatus}
+                Connection: {connectionStatus}
               </div>
               <div className={`voice-status ${voiceConnected ? 'connected' : 'disconnected'}`}>
                 Voice: {voiceConnected ? 'Connected' : 'Disconnected'}
@@ -622,7 +669,7 @@ function App() {
           <div className="debug-info">
             <p><strong>Debug Info:</strong> Board has {Object.keys(board).length} pieces | Room: {playerInfo?.room_id} | Player: {playerInfo?.color}</p>
             {Object.keys(board).length === 0 && (
-              <p className="debug-warning">⚠️ No chess pieces loaded! Try clicking "Refresh Board" button.</p>
+              <p className="debug-warning">⚠️ No chess pieces loaded! The game will start when both players join.</p>
             )}
           </div>
           

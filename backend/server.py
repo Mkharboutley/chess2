@@ -1,7 +1,11 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from motor.motor_asyncio import AsyncIOMotorClient
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient
+except ImportError:
+    # Fallback for environments without MongoDB
+    AsyncIOMotorClient = None
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Tuple
 import json
@@ -11,8 +15,9 @@ from datetime import datetime
 import copy
 
 # MongoDB setup
-MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017") 
 DB_NAME = os.environ.get("DB_NAME", "chess_game_db")
+PORT = int(os.environ.get("PORT", "8001"))
 
 app = FastAPI(title="Chess Multiplayer API")
 
@@ -26,8 +31,24 @@ app.add_middleware(
 )
 
 # MongoDB connection
-client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
+if AsyncIOMotorClient:
+    try:
+        client = AsyncIOMotorClient(MONGO_URL)
+        db = client[DB_NAME]
+        MONGODB_AVAILABLE = True
+    except Exception as e:
+        print(f"MongoDB connection failed: {e}")
+        MONGODB_AVAILABLE = False
+        db = None
+else:
+    print("MongoDB not available, using in-memory storage")
+    MONGODB_AVAILABLE = False
+    db = None
+
+# In-memory storage fallback
+if not MONGODB_AVAILABLE:
+    GAME_ROOMS = {}
+    ROOM_COUNTER = 1000
 
 # Pydantic models
 class GameMove(BaseModel):
@@ -328,53 +349,77 @@ async def health_check():
 @app.post("/api/rooms")
 async def create_room():
     """Create a new game room"""
-    room_id = str(uuid.uuid4())[:8]
+    global ROOM_COUNTER
+    room_id = str(ROOM_COUNTER)
+    ROOM_COUNTER += 1
+    
     game_room = GameRoom(
         room_id=room_id,
         created_at=datetime.utcnow()
     )
     
-    await db.game_rooms.insert_one(game_room.dict())
+    if MONGODB_AVAILABLE:
+        await db.game_rooms.insert_one(game_room.dict())
+    else:
+        GAME_ROOMS[room_id] = game_room.dict()
+    
     return {"room_id": room_id, "status": "created"}
 
 @app.get("/api/rooms/{room_id}")
 async def get_room(room_id: str):
     """Get room details"""
-    room = await db.game_rooms.find_one({"room_id": room_id})
+    if MONGODB_AVAILABLE:
+        room = await db.game_rooms.find_one({"room_id": room_id})
+    else:
+        room = GAME_ROOMS.get(room_id)
+    
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     
     # Remove MongoDB _id for JSON serialization
-    room.pop("_id", None)
+    if "_id" in room:
+        room.pop("_id", None)
     return room
 
 @app.post("/api/rooms/{room_id}/join")
 async def join_room(room_id: str, player: Player):
     """Join a game room"""
-    room = await db.game_rooms.find_one({"room_id": room_id})
+    if MONGODB_AVAILABLE:
+        room = await db.game_rooms.find_one({"room_id": room_id})
+    else:
+        room = GAME_ROOMS.get(room_id)
+    
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     
     # Assign player color and position
     if not room.get("player1_id"):
-        await db.game_rooms.update_one(
-            {"room_id": room_id},
-            {"$set": {
-                "player1_id": player.player_id, 
-                "player1_name": player.name,
-                "game_status": "waiting"
-            }}
-        )
+        update_data = {
+            "player1_id": player.player_id, 
+            "player1_name": player.name,
+            "game_status": "waiting"
+        }
+        if MONGODB_AVAILABLE:
+            await db.game_rooms.update_one(
+                {"room_id": room_id},
+                {"$set": update_data}
+            )
+        else:
+            GAME_ROOMS[room_id].update(update_data)
         player_color = "white"
     elif not room.get("player2_id"):
-        await db.game_rooms.update_one(
-            {"room_id": room_id},
-            {"$set": {
-                "player2_id": player.player_id, 
-                "player2_name": player.name,
-                "game_status": "active"
-            }}
-        )
+        update_data = {
+            "player2_id": player.player_id, 
+            "player2_name": player.name,
+            "game_status": "active"
+        }
+        if MONGODB_AVAILABLE:
+            await db.game_rooms.update_one(
+                {"room_id": room_id},
+                {"$set": update_data}
+            )
+        else:
+            GAME_ROOMS[room_id].update(update_data)
         player_color = "black"
     else:
         raise HTTPException(status_code=400, detail="Room is full")
@@ -384,7 +429,11 @@ async def join_room(room_id: str, player: Player):
 @app.get("/api/rooms/{room_id}/board")
 async def get_board_state(room_id: str):
     """Get current board state"""
-    room = await db.game_rooms.find_one({"room_id": room_id})
+    if MONGODB_AVAILABLE:
+        room = await db.game_rooms.find_one({"room_id": room_id})
+    else:
+        room = GAME_ROOMS.get(room_id)
+    
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     
@@ -409,7 +458,11 @@ async def get_board_state(room_id: str):
 @app.post("/api/rooms/{room_id}/resign/{player_id}")
 async def resign_game(room_id: str, player_id: str):
     """Resign from the game"""
-    room = await db.game_rooms.find_one({"room_id": room_id})
+    if MONGODB_AVAILABLE:
+        room = await db.game_rooms.find_one({"room_id": room_id})
+    else:
+        room = GAME_ROOMS.get(room_id)
+    
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     
@@ -420,21 +473,29 @@ async def resign_game(room_id: str, player_id: str):
     else:
         raise HTTPException(status_code=400, detail="Player not in this game")
     
-    await db.game_rooms.update_one(
-        {"room_id": room_id},
-        {"$set": {
-            "game_status": "resigned",
-            "winner": winner,
-            "resignation_by": player_id
-        }}
-    )
+    update_data = {
+        "game_status": "resigned",
+        "winner": winner,
+        "resignation_by": player_id
+    }
+    if MONGODB_AVAILABLE:
+        await db.game_rooms.update_one(
+            {"room_id": room_id},
+            {"$set": update_data}
+        )
+    else:
+        GAME_ROOMS[room_id].update(update_data)
     
     return {"status": "resigned", "winner": winner}
 
 @app.post("/api/rooms/{room_id}/undo/{player_id}")
 async def request_undo(room_id: str, player_id: str):
     """Request to undo the last move"""
-    room = await db.game_rooms.find_one({"room_id": room_id})
+    if MONGODB_AVAILABLE:
+        room = await db.game_rooms.find_one({"room_id": room_id})
+    else:
+        room = GAME_ROOMS.get(room_id)
+    
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     
@@ -442,17 +503,24 @@ async def request_undo(room_id: str, player_id: str):
     if player_id not in undo_requests:
         undo_requests.append(player_id)
         
-        await db.game_rooms.update_one(
-            {"room_id": room_id},
-            {"$set": {"undo_requests": undo_requests}}
-        )
+        if MONGODB_AVAILABLE:
+            await db.game_rooms.update_one(
+                {"room_id": room_id},
+                {"$set": {"undo_requests": undo_requests}}
+            )
+        else:
+            GAME_ROOMS[room_id]["undo_requests"] = undo_requests
     
     return {"status": "undo_requested", "requests": undo_requests}
 
 @app.post("/api/rooms/{room_id}/rematch/{player_id}")
 async def request_rematch(room_id: str, player_id: str):
     """Request a rematch"""
-    room = await db.game_rooms.find_one({"room_id": room_id})
+    if MONGODB_AVAILABLE:
+        room = await db.game_rooms.find_one({"room_id": room_id})
+    else:
+        room = GAME_ROOMS.get(room_id)
+    
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     
@@ -462,31 +530,38 @@ async def request_rematch(room_id: str, player_id: str):
         
         # If both players requested rematch, start new game
         if len(rematch_requests) == 2:
-            await db.game_rooms.update_one(
-                {"room_id": room_id},
-                {"$set": {
-                    "moves": [],
-                    "current_turn": "white",
-                    "game_status": "active",
-                    "winner": None,
-                    "resignation_by": None,
-                    "undo_requests": [],
-                    "rematch_requests": [],
-                    "white_king_moved": False,
-                    "black_king_moved": False,
-                    "white_rook_a1_moved": False,
-                    "white_rook_h1_moved": False,
-                    "black_rook_a8_moved": False,
-                    "black_rook_h8_moved": False,
-                    "en_passant_target": None
-                }}
-            )
+            update_data = {
+                "moves": [],
+                "current_turn": "white",
+                "game_status": "active",
+                "winner": None,
+                "resignation_by": None,
+                "undo_requests": [],
+                "rematch_requests": [],
+                "white_king_moved": False,
+                "black_king_moved": False,
+                "white_rook_a1_moved": False,
+                "white_rook_h1_moved": False,
+                "black_rook_a8_moved": False,
+                "black_rook_h8_moved": False,
+                "en_passant_target": None
+            }
+            if MONGODB_AVAILABLE:
+                await db.game_rooms.update_one(
+                    {"room_id": room_id},
+                    {"$set": update_data}
+                )
+            else:
+                GAME_ROOMS[room_id].update(update_data)
             return {"status": "rematch_started"}
         else:
-            await db.game_rooms.update_one(
-                {"room_id": room_id},
-                {"$set": {"rematch_requests": rematch_requests}}
-            )
+            if MONGODB_AVAILABLE:
+                await db.game_rooms.update_one(
+                    {"room_id": room_id},
+                    {"$set": {"rematch_requests": rematch_requests}}
+                )
+            else:
+                GAME_ROOMS[room_id]["rematch_requests"] = rematch_requests
     
     return {"status": "rematch_requested", "requests": rematch_requests}
 
@@ -498,7 +573,11 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
     
     try:
         # Send initial board state
-        room = await db.game_rooms.find_one({"room_id": room_id})
+        if MONGODB_AVAILABLE:
+            room = await db.game_rooms.find_one({"room_id": room_id})
+        else:
+            room = GAME_ROOMS.get(room_id)
+        
         if room:
             board = get_initial_board()
             for move in room.get("moves", []):
@@ -526,7 +605,11 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
             
             if message["type"] == "move":
                 # Validate and process move
-                room = await db.game_rooms.find_one({"room_id": room_id})
+                if MONGODB_AVAILABLE:
+                    room = await db.game_rooms.find_one({"room_id": room_id})
+                else:
+                    room = GAME_ROOMS.get(room_id)
+                
                 if room and room.get("current_turn") == message.get("player_color"):
                     # Get current board state
                     board = get_initial_board()
@@ -583,10 +666,17 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
                             elif piece == "black_rook" and message["from_square"] == "h8":
                                 update_data["$set"]["black_rook_h8_moved"] = True
                             
-                            await db.game_rooms.update_one(
-                                {"room_id": room_id},
-                                update_data
-                            )
+                            if MONGODB_AVAILABLE:
+                                await db.game_rooms.update_one(
+                                    {"room_id": room_id},
+                                    update_data
+                                )
+                            else:
+                                # Handle in-memory update
+                                if "moves" not in GAME_ROOMS[room_id]:
+                                    GAME_ROOMS[room_id]["moves"] = []
+                                GAME_ROOMS[room_id]["moves"].append(move.dict())
+                                GAME_ROOMS[room_id].update(update_data["$set"])
                             
                             # Broadcast move to all players in room
                             await manager.broadcast_to_room(
@@ -666,4 +756,4 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=PORT)

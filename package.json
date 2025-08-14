@@ -1,0 +1,19 @@
+{
+  "name": "chess-multiplayer-game",
+  "version": "1.0.0",
+  "description": "Multiplayer online chess game with React frontend and FastAPI backend",
+  "scripts": {
+    "install-all": "cd backend && pip install -r requirements.txt && cd ../frontend && npm install",
+    "start-backend": "cd backend && python server.py",
+    "start-frontend": "cd frontend && npm start",
+    "start": "concurrently \"npm run start-backend\" \"npm run start-frontend\"",
+    "test-backend": "cd backend && python -m pytest tests/",
+    "test-api": "python backend_test.py"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "keywords": ["chess", "multiplayer", "react", "fastapi", "websocket"],
+  "author": "Chess Game Developer",
+  "license": "MIT"
+}
